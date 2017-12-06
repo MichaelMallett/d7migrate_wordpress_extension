@@ -1,0 +1,10 @@
+name = "DOF Migrate"
+description = "Import content from external sources"
+package = "DOF"
+core = 7.x
+
+dependencies[] = simplehtmldom
+dependencies[] = wordpress_migrate
+dependencies[] = migrate_extras
+
+files[] = dof_migrate.migrate.inc

@@ -1,0 +1,135 @@
+<?php
+/**
+ * @file
+ * Module file dof_migrate.module.
+ */
+
+/**
+ * Implements hook_migrate_api().
+ */
+function dof_migrate_migrate_api() {
+  $api = [
+    'api' => 2,
+    'wizard extenders' => [
+      'DofMigrateWordPressMigrateWizard' => ['DofMigrateWordpressWizardExtender'],
+    ],
+  ];
+  return $api;
+}
+
+/**
+ * Implements hook_migrate_api_alter().
+ */
+function dof_migrate_migrate_api_alter(array &$info) {
+  $info['wordpress_migrate']['wizard classes'] = ['DofMigrateWordPressMigrateWizard'];
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function dof_migrate_form_migrate_ui_wizard_alter(&$form, &$form_state) {
+  // If we are on the last page of a wizard, and our extender is present,
+  // make our alterations to the form.
+  if (!empty($form['actions']['finish'])) {
+    $extender = $form_state['wizard']->getExtender('DofMigrateWordpressWizardExtender');
+    if ($extender) {
+      $extender->reviewFormAlter($form, $form_state);
+    }
+  }
+}
+
+/**
+ * Programmatically import migration settings to Wordpress Migrate.
+ *
+ * @param array $migration_value
+ *   Array of migration values to override the defaults.
+ */
+function dof_migrate_create_wordpress_migration($migration_value) {
+  // Reset the file_get_stream_wrappers static cache so the 'wordpress' stream
+  // wrapper created by the wordpress_migrate module is available.
+  $wrappers_storage = &drupal_static('file_get_stream_wrappers', NULL, TRUE);
+
+  // The wordpress_migrate module's UI is a multi-step form that collects all
+  // configuration needed to migrate a given blog. As this form's steps are
+  // submitted and validated, an export file is downloaded for each blog and its
+  // contents are migrated. There is no easy way to export these settings or use
+  // code to provide that configuration and then trigger a migration, so the
+  // best bet is simulate the submission of those form steps with the needed
+  // data.
+  module_load_include('inc', 'migrate_ui', 'migrate_ui.wizard');
+  $default_migration_values = [
+    'source_select' => '0',
+    'domain' => '',
+    'wxr_filename' => '',
+    'wxr_path' => 'public://migrate_tmp',
+    'do_migration' => 1,
+    'default_author' => 'drupal',
+    'page_type' => 'page',
+    'blog_post_type' => 'blog_article',
+    'path_action' => 1,
+    'podcast_field' => '',
+    'tag_field' => 'field_tags',
+    'category_field' => 'field_category',
+    'generate_redirects' => '',
+    'comments' => '',
+    'attachment_field' => '',
+    'text_format' => 'rich_text',
+    'text_format_comment' => 'filtered_html',
+  ];
+  // Import each of the blogs.
+  // Combine the default settings and the custom per blog settings.
+  $migration_value = array_merge($default_migration_values, $migration_value);
+
+  // Process upload file by copying to the public files directory, saving to
+  // the files table and handing that file object to the form.
+  $file_path = $migration_value['wxr_path'] . '/' . $migration_value['wxr_filename'];
+  $file = file_copy((object) ['uri' => $file_path], $file_path);
+  // Wordpress Migrate Wizard uses $_FILES to check the status of the uploaded
+  // file. This is a hacky solution but uploading programmatically doesn't
+  // populate this array.
+  $_FILES['files'] = [
+    'name' => ['wxr_file' => $file->filename],
+    'type' => ['wxr_file' => 'text/xml'],
+    'tmp_name' => ['wxr_file' => $file->uri],
+    'error' => ['wxr_file' => 0],
+  ];
+
+  $migration_value['wxr_file'] = $file;
+
+  // Set the form state values.
+  $form_state['values'] = $migration_value;
+  // Store the values so we can use them again since $form_state is
+  // a reference variable.
+  $form_state_values = $form_state['values'];
+
+  // Build the import form.
+  $form = drupal_get_form('migrate_ui_wizard', 'DofMigrateWordPressMigrateWizard');
+  $form = migrate_ui_wizard($form, $form_state, 'dofmigratewordpressmigratewizard');
+  // Get extender if required.
+  $extender = $form_state['wizard']->getExtender('DofMigrateWordpressWizardExtender');
+  $form_steps = $migration_value['steps'];
+  for ($i = 1; $i <= $form_steps; $i++) {
+    $form_state['wizard']->formValidate($form_state);
+    // Call our extender class alter.
+    if ($i == $form_steps && $extender) {
+      $extender->reviewFormAlter($form, $form_state);
+    }
+    migrate_ui_wizard_next_submit($form, $form_state);
+    // Put any values removed from the array back in for the next step.
+    $form_state['values'] = array_merge($form_state_values, $form_state['values']);
+  }
+
+  // Submit the form.
+  drupal_form_submit('migrate_ui_wizard', $form_state);
+  $form_state['wizard']->formSaveSettings();
+
+  // Notify the user that the migration was created successfully.
+  $message = t('The @site_name migration was successfully created.', [
+    '@site_name' => $migration_value['domain'],
+  ]);
+  drupal_set_message($message, 'success');
+
+  // Cleanup file. Suppress errors as wordpress_migrate will have deleted the
+  // file itself.
+  @file_delete($file);
+}
